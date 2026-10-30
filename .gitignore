@@ -1,0 +1,8 @@
+work/
+outputs/
+.DS_Store
+**/xcuserdata/
+**/.env*
+!**/.env.example
+web/dist/
+web/worker/page.js

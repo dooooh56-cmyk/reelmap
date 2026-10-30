@@ -1,0 +1,38 @@
+import assert from 'node:assert/strict';
+import worker,{mergeEntities} from '../worker/index.js';
+const caption='📍#산와쇼텐\n📍서울 마포구 토정로35길 6';
+const entity={name:'산와쇼텐',address:'서울 마포구 토정로35길 6',evidence:caption,evidenceSource:'caption'};
+const visual={...entity,evidence:'산와쇼텐 서울 마포구 토정로35길 6',evidenceSource:'media'};
+const docs=[{id:'123',place_name:'산와쇼텐',road_address_name:entity.address,address_name:'서울 마포구 용강동 10',x:'126.94',y:'37.54',category_group_code:'FD6',category_name:'음식점 > 일식'}];
+const media={mime:'video/mp4',data:'aGVsbG8='};
+const env={GEMINI_API_KEY:'stub',KAKAO_REST_API_KEY:'stub'};
+const ask=body=>worker.fetch(new Request('https://test.example/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env).then(r=>r.json());
+const ai=(entities,input=100,output=20,thinking=5)=>Response.json({candidates:[{content:{parts:[{text:JSON.stringify({restaurants:entities})}]}}],usageMetadata:{promptTokenCount:input,candidatesTokenCount:output,thoughtsTokenCount:thinking,totalTokenCount:input+output+thinking}});
+const original=globalThis.fetch;
+try{
+ let calls=[];
+ globalThis.fetch=async(url,options)=>{if(String(url).includes('generativelanguage.googleapis.com')){calls.push(JSON.parse(options.body));return ai([entity]);}assert(String(url).startsWith('https://dapi.kakao.com/'));return Response.json({documents:docs});};
+ let result=await ask({url:'https://www.instagram.com/reel/DF7oYUjB3jw/',text:caption,media});
+ assert.equal(result.status,'auto_save');assert.equal(result.mediaSkipped,true);assert.equal(result.mediaAnalyzed,false);assert.equal(calls.length,1);assert(!calls[0].contents[0].parts.some(p=>p.inlineData));assert.equal(result.usage.totalTokens,125);assert.deepEqual(result.stages,['caption']);
+ calls=[];
+ globalThis.fetch=async(url,options)=>{if(String(url).includes('generativelanguage.googleapis.com')){calls.push(JSON.parse(options.body));return calls.length===1?ai([{...entity,address:'',evidence:'산와쇼텐'}]):ai([visual],300,30,10);}return Response.json({documents:docs});};
+ result=await ask({text:'산와쇼텐',media});
+ assert.equal(result.status,'auto_save');assert.equal(result.groups.length,1);assert.equal(result.mediaAnalyzed,true);assert.equal(result.mediaSkipped,false);assert.equal(calls.length,2);assert(calls[1].contents[0].parts.some(p=>p.inlineData));assert.equal(result.usage.inputTokens,400);assert.equal(result.usage.outputTokens,50);assert.equal(result.usage.thinkingTokens,15);assert.equal(result.usage.totalTokens,465);assert.deepEqual(result.stages,['caption','media']);
+ calls=[];
+ globalThis.fetch=async(url,options)=>{if(String(url).includes('generativelanguage.googleapis.com')){calls.push(JSON.parse(options.body));return ai([visual]);}return Response.json({documents:docs});};
+ result=await ask({media});assert.equal(result.status,'auto_save');assert.equal(result.mediaAnalyzed,true);assert.deepEqual(result.stages,['media']);assert.equal(calls.length,1);
+ calls=[];
+ globalThis.fetch=async(url,options)=>{if(String(url).includes('generativelanguage.googleapis.com')){calls.push(JSON.parse(options.body));return Response.json({error:{}},{status:402});}return Response.json({documents:docs});};
+ result=await ask({text:caption,media});assert.equal(calls.length,1);assert.equal(result.method,'caption_rules');assert.equal(result.usage,null);assert.equal(result.mediaAnalyzed,false);
+ globalThis.fetch=async url=>{if(String(url).includes('generativelanguage.googleapis.com'))return Response.json({candidates:[{content:{parts:[{text:'invalid JSON'}]}}],usageMetadata:{promptTokenCount:100,candidatesTokenCount:20,thoughtsTokenCount:5,totalTokenCount:125}});return Response.json({documents:docs});};
+ result=await ask({text:caption});assert.equal(result.method,'caption_rules');assert.equal(result.usage.totalTokens,125);
+ calls=[];
+ globalThis.fetch=async(url,options)=>{if(String(url).includes('generativelanguage.googleapis.com')){calls.push(JSON.parse(options.body));return ai([visual]);}return Response.json({documents:docs});};
+ result=await ask({text:caption,media,analyzeMedia:true});assert.equal(result.status,'auto_save');assert.equal(result.mediaAnalyzed,true);assert.equal(calls.length,1);assert(calls[0].contents[0].parts.some(p=>p.inlineData));assert.deepEqual(result.stages,['media']);
+ calls=[];
+ globalThis.fetch=async(url,options)=>{if(String(url).includes('generativelanguage.googleapis.com')){calls.push(JSON.parse(options.body));return ai([entity,{name:'다른식당',address:'',evidence:'다른식당',evidenceSource:'caption'}]);}return Response.json({documents:docs});};
+ result=await ask({text:caption+'\n다른식당',media});assert.equal(calls.length,2);assert.equal(result.mediaAnalyzed,true);assert.equal(result.status,'choose');
+ assert.equal(mergeEntities([entity],[{...visual,address:'다른로 5'}]).length,2);
+ assert.equal(mergeEntities([{...entity,address:''}],[visual])[0].address,visual.address);
+ console.log('Stage checks passed: caption-first skip, media fallback, media-only, token aggregation, charged invalid output, no retry on billing failure, conflicting evidence.');
+}finally{globalThis.fetch=original;}

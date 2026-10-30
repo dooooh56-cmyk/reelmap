@@ -1,0 +1,56 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import vm from 'node:vm';
+import {webcrypto} from 'node:crypto';
+import worker,{exactMatch} from '../worker/index.js';
+const entity={name:'아저씨네 낙지찜',address:'서울 서대문구 연세로5다길 39'};
+const branch={name:'아저씨네낙지찜 신촌점',address:'서울 서대문구 연세로5다길 39',lotAddress:'서울 서대문구 창천동 72-29'};
+assert(exactMatch(entity,branch,'신촌에서 찾은 식당'));
+assert(!exactMatch(entity,branch));
+assert(!exactMatch(entity,{...branch,address:'서울 서대문구 연세로5다길 40',lotAddress:''},'신촌'));
+assert(!exactMatch({...entity,name:'아저씨네 낙지찜 강남점'},branch,'신촌 강남'));
+assert(!exactMatch(entity,{...branch,name:'아저씨네낙지찜 유사식당점'},'신촌'));
+for(const road of ['연세로5다길 39','토정로35길 6','덕영대로1599번길 4','창천동 72-29']){assert(exactMatch({name:'식당',address:road},{name:'식당',address:road,lotAddress:''}));assert(!exactMatch({name:'식당',address:road},{name:'식당',address:road+'0',lotAddress:''}));}
+const html=await readFile(new URL('../worker/page.html',import.meta.url),'utf8');
+const script=html.match(/<script>([\s\S]*?)<\/script>/)[1];
+let blocked=false,errorMessage='';
+const context=vm.createContext({URL,crypto:webcrypto,localStorage:{setItem(){if(blocked)throw Error('quota');}},render(){},status(message){errorMessage=message;}});
+vm.runInContext("const KEY='test';let data={places:[],pending:[]},retrying=null;"+script.slice(script.indexOf('function commit('),script.indexOf('function status(')),context);
+const evaluate=source=>vm.runInContext(source,context);
+evaluate("pending('https://www.instagram.com/reel/DF7oYUjB3jw/?x=1','','first')");const firstID=evaluate('data.pending[0].id');
+evaluate("pending('https://www.instagram.com/parkyeny/reel/DF7oYUjB3jw/?x=2','new caption','second')");
+assert.equal(evaluate('data.pending.length'),1);assert.equal(evaluate('data.pending[0].id'),firstID);assert.equal(evaluate('data.pending[0].text'),'new caption');
+assert.equal(evaluate("saveMany([{id:'one',name:'A'}],'https://www.instagram.com/reel/DF7oYUjB3jw/')"),true);
+assert.equal(evaluate('data.places.length'),1);assert.equal(evaluate('data.pending.length'),0);
+evaluate("saveMany([{id:'one',name:'A'}],'https://www.instagram.com/reel/DF7oYUjB3jw/')");assert.equal(evaluate('data.places.length'),1);
+evaluate("pending('https://www.instagram.com/reel/DF7oYUjB3jw/','','unresolved')");
+evaluate("saveMany([{id:'two',name:'B'}],'https://www.instagram.com/reel/DF7oYUjB3jw/',false)");assert.equal(evaluate('data.pending.length'),1);
+const before=evaluate('JSON.stringify(data)');blocked=true;
+assert.equal(evaluate("saveMany([{id:'three',name:'C'}],'https://www.instagram.com/reel/DF7oYUjB3jw/')"),false);assert.equal(evaluate('JSON.stringify(data)'),before);assert(errorMessage.includes('저장하지 못했습니다'));
+// Missing credentials stop before any paid request, without putting a valid post in the failure queue.
+let opened=0,requested=0,queued=0;
+const elements={analyzeForm:{},settings:{showModal(){opened++;}},accessCode:{value:'',focus(){}}};
+const formContext=vm.createContext({$:(id)=>elements[id],config:{accessCodeRequired:true},busy:false,resumeAfterCode:false,status(){},api(){requested++;},pending(){queued++;}});
+vm.runInContext(script.slice(script.indexOf("$('analyzeForm').onsubmit="),script.indexOf("$('savedTab').onclick=")),formContext);
+await elements.analyzeForm.onsubmit({preventDefault(){}});assert.equal(opened,1);assert.equal(requested,0);assert.equal(queued,0);
+const original=globalThis.fetch;
+const invoke=body=>worker.fetch(new Request('https://test.example/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),{}).then(r=>r.json());
+try{
+ globalThis.fetch=async()=>new Response('denied',{status:403});
+ let result=await invoke({url:'https://www.instagram.com/reel/DF7oYUjB3jw/'});
+ assert.equal(result.status,'needs_input');assert.equal(result.acquisition.code,'http_403');assert.equal(result.acquisition.httpStatus,403);assert.equal(result.usage,null);
+ globalThis.fetch=async()=>new Response('<meta property="og:title" content="Instagram">');
+ result=await invoke({url:'https://www.instagram.com/reel/DF7oYUjB3jw/'});assert.equal(result.acquisition.code,'no_public_content');
+ let attempts=0;
+ globalThis.fetch=async()=>++attempts===1?new Response(null,{status:302,headers:{Location:'https://www.instagram.com/unavailable/'}}):new Response('<meta property="og:description" content="공개 본문">');
+ result=await invoke({url:'https://www.instagram.com/reel/DF7oYUjB3jw/'});assert.equal(result.acquisition.state,'fetched');assert.equal(result.acquisition.attempts,2);assert.deepEqual(result.acquisition.failures,['redirect_blocked']);
+ attempts=0;globalThis.fetch=async()=>{attempts++;return new Response(null,{status:302,headers:{Location:'https://www.instagram.com/accounts/login/?next=post'}});};
+ result=await invoke({url:'https://www.instagram.com/reel/DF7oYUjB3jw/'});assert.equal(result.acquisition.code,'login_required');assert.equal(attempts,1);
+ attempts=0;globalThis.fetch=async()=>{attempts++;return new Response('rate limited',{status:429});};
+ result=await invoke({url:'https://www.instagram.com/reel/DF7oYUjB3jw/'});assert.equal(attempts,1);assert.equal(result.acquisition.code,'http_429');
+ const paths=[];globalThis.fetch=async url=>{paths.push(String(url));return paths.length===1?new Response(null,{status:302,headers:{Location:'https://www.instagram.com/p/DF7oYUjB3jw/'}}):new Response('<meta property="og:description" content="공개 본문">');};
+ result=await invoke({url:'https://www.instagram.com/reel/DF7oYUjB3jw/'});assert.equal(result.acquisition.state,'fetched');assert.equal(paths.length,2);assert.equal(result.acquisition.attempts,1);
+ let fetched=false;globalThis.fetch=async()=>{fetched=true;throw Error('unexpected fetch');};
+ result=await invoke({url:'https://www.instagram.com/reel/DF7oYUjB3jw/',text:'추가 본문'});assert.equal(result.acquisition.state,'provided');assert.equal(fetched,false);
+}finally{globalThis.fetch=original;}
+console.log('Flow checks passed: canonical retry, deduplication, atomic storage failure, partial result preservation, auth-before-analysis, acquisition diagnostics.');
