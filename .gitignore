@@ -6,3 +6,4 @@ outputs/
 !**/.env.example
 web/dist/
 web/worker/page.js
+web/.openai/
